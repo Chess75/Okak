@@ -112,7 +112,7 @@ jobs:
 
           else
               echo "⚠️ Mode not recognized. Running normal mode."
-              eval "$CMD_BASE"
+              eval "$CMD_BASE matchmaking"
           fi
 
       - name: Auto-Restart After Timeout
