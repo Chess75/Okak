@@ -365,9 +365,6 @@ class Search:
         else:
             flag = 'EXACT'
 
-            flag = 'UPPER'
-        elif best_score >= beta:
-            flag = 'LOWER'
         # Normalize best_score into int
         entry = TTEntry(depth, int(best_score), flag, best_move)
         self.tt.store(key, entry)
