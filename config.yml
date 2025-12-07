@@ -1,9 +1,9 @@
-token: "XXXXXXXXXXXXXXXXXXXXXXXX"         # Lichess OAuth2 Token.
+token: ""         # Lichess OAuth2 Token.
 
 engines:
   standard:                               # Engine used for standard chess and when no suitable special engine is configured.
     dir: "./engines"                      # Directory containing the engine.
-    name: "engine_executable"             # Binary name of the engine to use.
+    name: "main"             # Binary name of the engine to use.
     ponder: true                          # Think on opponent's time.
     silence_stderr: false                 # Suppresses stderr output.
     move_overhead_multiplier: 1.0         # Increase if your bot flags games too often. Default move overhead is 1 second per 1 minute initital time.
@@ -86,7 +86,7 @@ opening_books:
 
 online_moves:
   opening_explorer:
-    enabled: false                        # Activate online moves from Lichess opening explorer. The move that has performed best for this bot is played.
+    enabled: true                        # Activate online moves from Lichess opening explorer. The move that has performed best for this bot is played.
     priority: 300                         # Priority with which this move source is used. Higher priority is used first.
 #   player: Username                      # Specific player whose Lichess opening explorer should be used, or “masters” to use the masters database.
     only_without_book: false              # Whether the Lichess opening explorer should only be used if there is no matching book.
@@ -153,8 +153,8 @@ challenge:                                # Incoming challenges.
 # max_initial: 10800                      # Maximum amount of initial time to accept a challenge.
   variants:                               # Chess variants to accept (https://lichess.org/variant).
     - standard
-    - chess960
-    - fromPosition
+#    - chess960
+#    - fromPosition
 #   - antichess
 #   - atomic
 #   - crazyhouse
@@ -174,7 +174,7 @@ challenge:                                # Incoming challenges.
     - rapid
     - classical
   bot_modes:                              # Game modes to accept against BOTs.
-#   - casual                              # Unrated games.
+    - casual                              # Unrated games.
     - rated                               # Rated games
   human_modes:                            # Game modes to accept against humans.
     - casual                              # Unrated games.
