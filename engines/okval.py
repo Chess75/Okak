@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # simple_engine.py
 # UCI-compatible simple chess engine using python-chess
-# Исправленная и улучшенная версия (убраны баги: double-pop, history inconsistency и т.д.)
+# Исправленная и улучшенная версия (фикс double-pop, корректные TT-флаги,
+# улучшенное упорядочивание ходов, безопасный push/pop, улучшенный тайм-менеджмент)
 
 import chess
 import sys
@@ -46,6 +47,7 @@ PST = {
 }
 
 # Transposition table entry
+# best_move — UCI string или None (надёжно сравнивать между досками)
 TTEntry = namedtuple("TTEntry", ["depth", "flag", "score", "best_move"])
 # flag: 'EXACT', 'LOWER', 'UPPER'
 
@@ -56,7 +58,6 @@ def fast_board_key(board: chess.Board):
     Быстрый ключ для TT — tuple из частей позиции (быстрее, чем fen()).
     Не идеален (не Zobrist), но достаточно для простого TT.
     """
-    # board_fen() + turn + castling rights + ep + halfmove_clock
     return (board.board_fen(), board.turn, board.castling_xfen(), board.ep_square, board.halfmove_clock)
 
 def mvv_lva_score(board, move):
@@ -65,7 +66,6 @@ def mvv_lva_score(board, move):
     Чем больше — тем раньше.
     """
     score = 0
-    # принимаем, что move применим к текущей доске (используем piece_at)
     if board.is_capture(move):
         victim = board.piece_at(move.to_square)
         attacker = board.piece_at(move.from_square)
@@ -110,7 +110,7 @@ def evaluate(board: chess.Board):
         mobility_count = len(list(board.legal_moves))
     mobility = 10 * mobility_count
 
-    # штраф/бонус за шах (плохо для стороны, которая ходит)
+    # штраф/бонус за шах
     check_bonus = -50 if board.is_check() else 0
 
     score_white = material + pst_score + mobility + check_bonus
@@ -123,7 +123,7 @@ class SearchState:
         self.nodes = 0
         self.start_time = 0.0
         self.time_limit = 0.0
-        # простой history heuristic: ключ = (side_to_move_bool, from_sq, to_sq)
+        # простой history heuristic: ключ (color, from, to) -> score
         self.history = defaultdict(int)
 
 # ---- Исключение для прерывания поиска ----
@@ -151,7 +151,7 @@ def quiescence(board: chess.Board, alpha: int, beta: int, state: SearchState, st
         alpha = stand_pat
 
     # generate capture moves and sort by MVV-LVA
-    captures = list(board.generate_legal_captures())
+    captures = [m for m in board.legal_moves if board.is_capture(m)]
     if not captures:
         return alpha
     captures.sort(key=lambda mv: -mvv_lva_score(board, mv))
@@ -163,6 +163,7 @@ def quiescence(board: chess.Board, alpha: int, beta: int, state: SearchState, st
         try:
             score = -quiescence(board, -beta, -alpha, state, stop_event)
         finally:
+            # гарантированно снимаем ход — единственный pop для соответствующего push
             board.pop()
         if score >= beta:
             return beta
@@ -218,13 +219,13 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
 
     # Сборка ключей сортировки
     def move_key(mv):
-        # TT-ход — самый высокий приоритет
-        if tt_entry and tt_entry.best_move and mv == tt_entry.best_move:
+        # TT-ход — самый высокий приоритет (сравниваем по UCI)
+        if tt_entry and tt_entry.best_move and mv.uci() == tt_entry.best_move:
             return (0, 0, 0)
         # captures: primary by -MVV_LVA so larger score goes first
         cap = 0 if board.is_capture(mv) else 1
         mvv = -mvv_lva_score(board, mv)
-        # history heuristic (меньше значение в ключе => раньше); храним отрицательное для сортировки
+        # history heuristic (больше -> раньше) — используем текущее значение из state.history
         hist = -state.history[(board.turn, mv.from_square, mv.to_square)]
         return (cap, mvv, hist)
 
@@ -234,14 +235,12 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
         if stop_event.is_set():
             raise SearchAbort()
 
-        # Сохраним сторону и факт захвата ДО push(), чтобы избежать обращений после pop()
-        side = board.turn  # True для белых, False для чёрных
-        was_capture = board.is_capture(move)
-
+        mover = board.turn  # кто делает этот ход (до push)
         board.push(move)
         try:
             score = -negamax(board, depth - 1, -beta, -alpha, state, stop_event)
         finally:
+            # гарантированно снимаем ход — единственный pop для соответствующего push
             board.pop()
 
         if score > best_score:
@@ -250,14 +249,14 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
 
         if score > alpha:
             alpha = score
-            # update history heuristic for non-capture moves (captures are guided by MVV-LVA)
-            if not was_capture:
-                # используем ключ стороны, которая сделала ход (side)
-                state.history[(side, move.from_square, move.to_square)] += 2 ** depth
+            # update history heuristic for non-capture moves (captures руководствуются MVV-LVA)
+            if not board.is_capture(move):
+                # ключ — цвет, который совершил ход
+                state.history[(mover, move.from_square, move.to_square)] += 2 ** depth
 
         if alpha >= beta:
             # beta-cutoff: запомним ход в history для ускорения порядка
-            state.history[(side, move.from_square, move.to_square)] += 2 ** depth
+            state.history[(mover, move.from_square, move.to_square)] += 2 ** depth
             break
 
     # вычисление флага TT корректно относительно исходных alpha_orig/beta_orig
@@ -268,8 +267,9 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
     else:
         flag = 'EXACT'
 
-    # Сохраним entry
-    state.tt[key] = TTEntry(depth=depth, flag=flag, score=best_score, best_move=best_move)
+    # Сохраним entry. best_move сохраняем как UCI (строку) или None
+    best_move_uci = best_move.uci() if best_move is not None else None
+    state.tt[key] = TTEntry(depth=depth, flag=flag, score=best_score, best_move=best_move_uci)
     return best_score
 
 # ---- Поисковый поток с итеративным углублением ----
@@ -281,6 +281,7 @@ class SearchThread(threading.Thread):
     """
     def __init__(self, root_board: chess.Board, wtime=None, btime=None, winc=0, binc=0, movetime=None, max_depth=None, stop_event=None):
         super().__init__()
+        # делаем копию — чтобы внешний board можно было безопасно изменять
         self.root_board = root_board.copy()
         self.wtime = wtime
         self.btime = btime
@@ -321,9 +322,6 @@ class SearchThread(threading.Thread):
 
     def run(self):
         ms = self.time_remaining_ms()
-        # защита от нуля/отрицательных
-        if ms is None or ms <= 0:
-            ms = 100  # минимально 100ms
         self.state.time_limit = ms / 1000.0
         self.state.start_time = time.time()
 
@@ -339,13 +337,15 @@ class SearchThread(threading.Thread):
                 # если в TT есть best_move для root position, ставим его первым
                 root_key = fast_board_key(self.root_board)
                 root_tt = self.state.tt.get(root_key)
+
                 def root_key_fn(mv):
-                    if root_tt and root_tt.best_move and mv == root_tt.best_move:
+                    if root_tt and root_tt.best_move and mv.uci() == root_tt.best_move:
                         return (0, 0)
                     # captures first by MVV-LVA
                     cap = 0 if self.root_board.is_capture(mv) else 1
                     mvv = -mvv_lva_score(self.root_board, mv)
                     return (cap, mvv)
+
                 moves.sort(key=root_key_fn)
 
                 best_for_depth = None
@@ -354,19 +354,18 @@ class SearchThread(threading.Thread):
                 for mv in moves:
                     if self.stop_event.is_set():
                         break
-                    # push once per move, pop в finally -> гарантированно симметрично
+                    # push once per move — pop в finally (гарантированно один pop)
                     self.root_board.push(mv)
                     try:
                         # поиск на depth-1; границы широкие, используем negamax
                         score = -negamax(self.root_board, depth - 1, -INF, INF, self.state, self.stop_event)
                     except SearchAbort:
-                        # завершение по тайм-ауту или stop_event — выйти наружу
-                        # НЕ делать pop здесь — finally сделает pop один раз
+                        # при прерывании просто выйти наружу (доска будет восстановлена в finally)
+                        # не делаем дополнительных pop здесь (finally сделает единственный pop)
                         raise
                     finally:
-                        # гарантированно снимаем ход (один pop)
-                        if self.root_board.move_stack:
-                            self.root_board.pop()
+                        # гарантированно снимаем ход — единственный pop для соответствующего push
+                        self.root_board.pop()
 
                     if score > best_score_for_depth:
                         best_score_for_depth = score
@@ -382,12 +381,13 @@ class SearchThread(threading.Thread):
                     self.best_score = best_score_for_depth
                     elapsed = time.time() - self.state.start_time
                     nps = int(self.state.nodes / elapsed) if elapsed > 0 else 0
-                    # UCI-style info (pv — упрощённо)
+                    # UCI-style info (pv как минимум первый ход)
                     try:
                         pv_str = self.best_move.uci()
                     except Exception:
                         pv_str = "-"
                     print(f"info depth {depth} score cp {best_score_for_depth} time {int(elapsed*1000)} nodes {self.state.nodes} nps {nps} pv {pv_str}")
+                    sys.stdout.flush()
 
                 # стоп по таймауту
                 if (time.time() - self.state.start_time) > self.state.time_limit:
@@ -401,6 +401,7 @@ class SearchThread(threading.Thread):
         except Exception as e:
             # логируем исключение, не даём упасть процессу
             print("Search error:", e, file=sys.stderr)
+            sys.stderr.flush()
 
 # ---- UCI loop ----
 
@@ -507,6 +508,7 @@ def uci_loop():
                     stop_event.clear()
 
                 stop_event = threading.Event()
+                # создаём поток с текущей позицией (копируется внутри)
                 search_thread = SearchThread(board, wtime=wtime, btime=btime, winc=winc or 0, binc=binc or 0, movetime=movetime, max_depth=depth, stop_event=stop_event)
                 search_thread.start()
 
