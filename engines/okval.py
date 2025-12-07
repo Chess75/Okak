@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # simple_engine.py
 # UCI-compatible simple chess engine using python-chess
-# Исправленная и улучшенная версия (fix double-pop, корректные TT-флаги,
-# улучшенное упорядочивание ходов, безопасный push/pop, улучшенный тайм-менеджмент)
+# Исправленная и улучшенная версия (убраны баги: double-pop, history inconsistency и т.д.)
 
 import chess
 import sys
@@ -57,6 +56,7 @@ def fast_board_key(board: chess.Board):
     Быстрый ключ для TT — tuple из частей позиции (быстрее, чем fen()).
     Не идеален (не Zobrist), но достаточно для простого TT.
     """
+    # board_fen() + turn + castling rights + ep + halfmove_clock
     return (board.board_fen(), board.turn, board.castling_xfen(), board.ep_square, board.halfmove_clock)
 
 def mvv_lva_score(board, move):
@@ -65,6 +65,7 @@ def mvv_lva_score(board, move):
     Чем больше — тем раньше.
     """
     score = 0
+    # принимаем, что move применим к текущей доске (используем piece_at)
     if board.is_capture(move):
         victim = board.piece_at(move.to_square)
         attacker = board.piece_at(move.from_square)
@@ -109,7 +110,7 @@ def evaluate(board: chess.Board):
         mobility_count = len(list(board.legal_moves))
     mobility = 10 * mobility_count
 
-    # штраф/бонус за шах
+    # штраф/бонус за шах (плохо для стороны, которая ходит)
     check_bonus = -50 if board.is_check() else 0
 
     score_white = material + pst_score + mobility + check_bonus
@@ -122,7 +123,7 @@ class SearchState:
         self.nodes = 0
         self.start_time = 0.0
         self.time_limit = 0.0
-        # простой history heuristic
+        # простой history heuristic: ключ = (side_to_move_bool, from_sq, to_sq)
         self.history = defaultdict(int)
 
 # ---- Исключение для прерывания поиска ----
@@ -150,7 +151,7 @@ def quiescence(board: chess.Board, alpha: int, beta: int, state: SearchState, st
         alpha = stand_pat
 
     # generate capture moves and sort by MVV-LVA
-    captures = [m for m in board.legal_moves if board.is_capture(m)]
+    captures = list(board.generate_legal_captures())
     if not captures:
         return alpha
     captures.sort(key=lambda mv: -mvv_lva_score(board, mv))
@@ -223,7 +224,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
         # captures: primary by -MVV_LVA so larger score goes first
         cap = 0 if board.is_capture(mv) else 1
         mvv = -mvv_lva_score(board, mv)
-        # history heuristic (больше -> раньше)
+        # history heuristic (меньше значение в ключе => раньше); храним отрицательное для сортировки
         hist = -state.history[(board.turn, mv.from_square, mv.to_square)]
         return (cap, mvv, hist)
 
@@ -232,6 +233,11 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
     for move in moves:
         if stop_event.is_set():
             raise SearchAbort()
+
+        # Сохраним сторону и факт захвата ДО push(), чтобы избежать обращений после pop()
+        side = board.turn  # True для белых, False для чёрных
+        was_capture = board.is_capture(move)
+
         board.push(move)
         try:
             score = -negamax(board, depth - 1, -beta, -alpha, state, stop_event)
@@ -245,12 +251,13 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
         if score > alpha:
             alpha = score
             # update history heuristic for non-capture moves (captures are guided by MVV-LVA)
-            if not board.is_capture(move):
-                state.history[(not board.turn, move.from_square, move.to_square)] += 2 ** depth
+            if not was_capture:
+                # используем ключ стороны, которая сделала ход (side)
+                state.history[(side, move.from_square, move.to_square)] += 2 ** depth
 
         if alpha >= beta:
             # beta-cutoff: запомним ход в history для ускорения порядка
-            state.history[(not board.turn, move.from_square, move.to_square)] += 2 ** depth
+            state.history[(side, move.from_square, move.to_square)] += 2 ** depth
             break
 
     # вычисление флага TT корректно относительно исходных alpha_orig/beta_orig
@@ -314,6 +321,9 @@ class SearchThread(threading.Thread):
 
     def run(self):
         ms = self.time_remaining_ms()
+        # защита от нуля/отрицательных
+        if ms is None or ms <= 0:
+            ms = 100  # минимально 100ms
         self.state.time_limit = ms / 1000.0
         self.state.start_time = time.time()
 
@@ -344,17 +354,17 @@ class SearchThread(threading.Thread):
                 for mv in moves:
                     if self.stop_event.is_set():
                         break
-                    # push once per move, pop in finally -> гарантированно симметрично
+                    # push once per move, pop в finally -> гарантированно симметрично
                     self.root_board.push(mv)
                     try:
                         # поиск на depth-1; границы широкие, используем negamax
                         score = -negamax(self.root_board, depth - 1, -INF, INF, self.state, self.stop_event)
                     except SearchAbort:
                         # завершение по тайм-ауту или stop_event — выйти наружу
-                        self.root_board.pop()
+                        # НЕ делать pop здесь — finally сделает pop один раз
                         raise
                     finally:
-                        # гарантированно снимаем ход
+                        # гарантированно снимаем ход (один pop)
                         if self.root_board.move_stack:
                             self.root_board.pop()
 
@@ -372,7 +382,7 @@ class SearchThread(threading.Thread):
                     self.best_score = best_score_for_depth
                     elapsed = time.time() - self.state.start_time
                     nps = int(self.state.nodes / elapsed) if elapsed > 0 else 0
-                    # UCI-style info
+                    # UCI-style info (pv — упрощённо)
                     try:
                         pv_str = self.best_move.uci()
                     except Exception:
