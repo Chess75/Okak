@@ -86,7 +86,7 @@ opening_books:
 
 online_moves:
   opening_explorer:
-    enabled: true                        # Activate online moves from Lichess opening explorer. The move that has performed best for this bot is played.
+    enabled: false                        # Activate online moves from Lichess opening explorer. The move that has performed best for this bot is played.
     priority: 300                         # Priority with which this move source is used. Higher priority is used first.
 #   player: Username                      # Specific player whose Lichess opening explorer should be used, or “masters” to use the masters database.
     only_without_book: false              # Whether the Lichess opening explorer should only be used if there is no matching book.
