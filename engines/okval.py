@@ -375,8 +375,8 @@ def uci_loop():
     board = chess.Board()
     search_thread = None
     stop_event = threading.Event()
-    print("id name Okval-fixed")
-    print("id author Classic-fixed")
+    print("id name Okval 1.2")
+    print("id author Classic")
     print("uciok")
     sys.stdout.flush()
 
@@ -392,8 +392,8 @@ def uci_loop():
             cmd = parts[0]
 
             if cmd == "uci":
-                print("id name Okval-fixed")
-                print("id author Classic-fixed")
+                print("id name Okval 1.2")
+                print("id author Classic")
                 print("uciok")
                 sys.stdout.flush()
             elif cmd == "isready":
