@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # simple_engine_fixed.py
 # Исправленная и улучшенная версия UCI-движка на python-chess
 # Основные правки:
