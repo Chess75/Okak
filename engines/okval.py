@@ -357,7 +357,14 @@ class Search:
                 break
         # store in TT
         flag = 'EXACT'
-        if best_score <= alpha_orig := alpha:
+        alpha_orig = alpha
+        if best_score <= alpha_orig:
+            flag = 'UPPER'
+        elif best_score >= beta:
+            flag = 'LOWER'
+        else:
+            flag = 'EXACT'
+
             flag = 'UPPER'
         elif best_score >= beta:
             flag = 'LOWER'
