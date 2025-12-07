@@ -1,56 +1,39 @@
 #!/usr/bin/env python3
 """
-Okval - a UCI chess engine in Python
-Author: Classic
+Simple UCI-compatible chess engine "Okval" by author "classic".
+- Language: Python 3
+- Dependency: python-chess (pip install python-chess)
 
-Requirements:
-  pip install python-chess
+Features:
+- UCI protocol: responds to 'uci', 'isready', 'position', 'go', 'stop', 'quit', 'ucinewgame', basic 'setoption'
+- Search: minimax with alpha-beta + simple move ordering + quiescence search.
+- Evaluation: material + simple piece-square tables + mobility bonus.
+- Not a world-beater but plays reasonably and "tries to win" by preferring aggressive moves and captures.
 
-Run:
-  python Okval_engine.py
+Use with lichess-bot: point engine.command to `python3 okval_engine.py`
 
-This engine uses python-chess for move generation and implements a negamax
-alpha-beta search with iterative deepening, quiescence search, simple
-evaluation (material + piece-square tables + mobility), and a transposition
-table. It supports basic UCI commands and a "SkillLevel" option to tune
-playing strength (approx Lichess ~1700 for SkillLevel ~12).
-
-This file is a corrected, self-contained version. Fixes applied:
- - Removed unsupported/ambiguous assignment-expression usage.
- - Corrected transposition table flag logic and alpha/orig handling.
- - Replaced use of missing Board.can_claim_threefold() with board.is_repetition(3).
- - Cleaned up syntax errors and ensured all moves are validated before use.
-
-Note: For competitive play or stronger strength, a lot more tuning and
-optimizations are required (null-move pruning, improved eval, bitboards,
-multi-threading, etc.). This implementation focuses on correctness,
-legality of moves and decent play for the requested ~1700 level.
+Author: classic
+Engine name: Okval
 """
 
 import sys
 import time
-import random
 import math
+import threading
 from collections import defaultdict
 
 import chess
+import chess.polyglot
 
-# ---------------- Engine configuration / UCI options ----------------
+# UCI identity
 ENGINE_NAME = "Okval"
 ENGINE_AUTHOR = "Classic"
 
-# Default options (modifiable via 'setoption name <name> value <value>')
-OPTIONS = {
-    "Hash": 64,  # MB (used only to size the transposition table modestly)
-    "SkillLevel": 12,  # 0..20, roughly controls search depth/time/aggressiveness
-}
+# Default search parameters
+MAX_DEPTH = 4  # iterative deepening can be used by wrapper (keep small by default)
+TIME_BUFFER = 0.05  # seconds reserved
 
-# Map SkillLevel to search parameters
-def skill_to_depth(skill):
-    # skill 0 -> depth 1-2, skill 20 -> depth 8-12 depending on time
-    return max(1, 2 + skill // 3)
-
-# ---------------- Basic evaluation parameters ----------------
+# Piece values
 PIECE_VALUES = {
     chess.PAWN: 100,
     chess.KNIGHT: 320,
@@ -60,433 +43,359 @@ PIECE_VALUES = {
     chess.KING: 20000,
 }
 
-# Piece-square tables (simple, middle-game oriented)
+# Simple piece-square tables (from common simplified heuristics)
+# indexed by square for white; for black we mirror vertically
 PST = {
-    chess.PAWN: [
-         0,  0,  0,   0,   0,  0,  0,   0,
-         5, 10, 10, -20, -20, 10, 10,   5,
-         5, -5,-10,   0,   0,-10, -5,   5,
-         0,  0,  0,  20,  20,  0,  0,   0,
-         5,  5, 10,  25,  25, 10,  5,   5,
-        10, 10, 20,  30,  30, 20, 10,  10,
-        50, 50, 50,  50,  50, 50, 50,  50,
-         0,  0,  0,   0,   0,  0,  0,   0
-    ],
-    chess.KNIGHT: [
-        -50,-40,-30,-30,-30,-30,-40,-50,
-        -40,-20,  0,  5,  5,  0,-20,-40,
-        -30,  5, 10, 15, 15, 10,  5,-30,
-        -30,  0, 15, 20, 20, 15,  0,-30,
-        -30,  5, 15, 20, 20, 15,  5,-30,
-        -30,  0, 10, 15, 15, 10,  0,-30,
-        -40,-20,  0,  0,  0,  0,-20,-40,
-        -50,-40,-30,-30,-30,-30,-40,-50
-    ],
-    chess.BISHOP: [
-        -20,-10,-10,-10,-10,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  5, 10, 10,  5,  0,-10,
-        -10,  5,  5, 10, 10,  5,  5,-10,
-        -10,  0, 10, 10, 10, 10,  0,-10,
-        -10, 10, 10, 10, 10, 10, 10,-10,
-        -10,  5,  0,  0,  0,  0,  5,-10,
-        -20,-10,-10,-10,-10,-10,-10,-20
-    ],
-    chess.ROOK: [
-         0,  0,  5, 10, 10,  5,  0,  0,
-         0,  0,  5, 10, 10,  5,  0,  0,
-         0,  0,  5, 10, 10,  5,  0,  0,
-         0,  0,  5, 10, 10,  5,  0,  0,
-         0,  0,  5, 10, 10,  5,  0,  0,
-         0,  0,  5, 10, 10,  5,  0,  0,
-        25, 25, 25, 25, 25, 25, 25, 25,
-         0,  0,  5, 10, 10,  5,  0,  0
-    ],
-    chess.QUEEN: [
-        -20,-10,-10, -5, -5,-10,-10,-20,
-        -10,  0,  0,  0,  0,  0,  0,-10,
-        -10,  0,  5,  5,  5,  5,  0,-10,
-         -5,  0,  5,  5,  5,  5,  0, -5,
-          0,  0,  5,  5,  5,  5,  0, -5,
-        -10,  5,  5,  5,  5,  5,  0,-10,
-        -10,  0,  5,  0,  0,  0,  0,-10,
-        -20,-10,-10, -5, -5,-10,-10,-20
-    ],
-    chess.KING: [
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -30,-40,-40,-50,-50,-40,-40,-30,
-        -20,-30,-30,-40,-40,-30,-30,-20,
-        -10,-20,-20,-20,-20,-20,-20,-10,
-         20, 20,  0,  0,  0,  0, 20, 20,
-         20, 30, 10,  0,  0, 10, 30, 20
-    ]
+    chess.PAWN: [0,0,0,0,0,0,0,0,
+                 5,10,10,-20,-20,10,10,5,
+                 5,-5,-10,0,0,-10,-5,5,
+                 0,0,0,20,20,0,0,0,
+                 5,5,10,25,25,10,5,5,
+                 10,10,20,30,30,20,10,10,
+                 50,50,50,50,50,50,50,50,
+                 0,0,0,0,0,0,0,0],
+    chess.KNIGHT: [-50,-40,-30,-30,-30,-30,-40,-50,
+                   -40,-20,0,5,5,0,-20,-40,
+                   -30,5,10,15,15,10,5,-30,
+                   -30,0,15,20,20,15,0,-30,
+                   -30,5,15,20,20,15,5,-30,
+                   -30,0,10,15,15,10,0,-30,
+                   -40,-20,0,0,0,0,-20,-40,
+                   -50,-90,-30,-30,-30,-30,-90,-50],
+    chess.BISHOP: [-20,-10,-10,-10,-10,-10,-10,-20,
+                   -10,5,0,0,0,0,5,-10,
+                   -10,10,10,10,10,10,10,-10,
+                   -10,0,10,10,10,10,0,-10,
+                   -10,5,5,10,10,5,5,-10,
+                   -10,0,5,10,10,5,0,-10,
+                   -10,0,0,0,0,0,0,-10,
+                   -20,-10,-40,-10,-40,-10,-10,-20],
+    chess.ROOK: [0,0,5,10,10,5,0,0,
+                 -5,0,0,0,0,0,0,-5,
+                 -5,0,0,0,0,0,0,-5,
+                 -5,0,0,0,0,0,0,-5,
+                 -5,0,0,0,0,0,0,-5,
+                 -5,0,0,0,0,0,0,-5,
+                 5,10,10,10,10,10,10,5,
+                 0,0,0,0,0,0,0,0],
+    chess.QUEEN: [-20,-10,-10,-5,-5,-10,-10,-20,
+                  -10,0,5,0,0,0,0,-10,
+                  -10,5,5,5,5,5,0,-10,
+                  0,0,5,5,5,5,0,-5,
+                  -5,0,5,5,5,5,0,-5,
+                  -10,0,5,0,0,0,0,-10,
+                  -10,0,0,0,0,0,0,-10,
+                  -20,-10,-10,-5,-5,-10,-10,-20],
+    chess.KING: [20,30,10,0,0,10,30,20,
+                 20,20,0,0,0,0,20,20,
+                 -10,-20,-20,-20,-20,-20,-20,-10,
+                 -20,-30,-30,-40,-40,-30,-30,-20,
+                 -30,-40,-40,-50,-50,-40,-40,-30,
+                 -30,-40,-40,-50,-50,-40,-40,-30,
+                 -30,-40,-40,-50,-50,-40,-40,-30,
+                 -30,-40,-40,-50,-50,-40,-40,-30],
 }
 
-# Mirror function for black
-def pst_score(piece_type, square, color):
-    table = PST[piece_type]
-    if color == chess.WHITE:
-        return table[square]
-    else:
-        # mirror vertically for black
-        rank = chess.square_rank(square)
-        file = chess.square_file(square)
-        mirrored = chess.square(file, 7 - rank)
-        return table[mirrored]
+# Transposition table
+TT = {}
 
-# ---------------- Transposition Table ----------------
-class TTEntry:
-    def __init__(self, depth, score, flag, best):
-        self.depth = depth
-        self.score = score
-        self.flag = flag  # 'EXACT', 'LOWER', 'UPPER'
-        self.best = best
+class SearchTimeout(Exception):
+    pass
 
-class TranspositionTable:
-    def __init__(self, mb=64):
-        approx_entries = max(1000, (mb * 1024 * 1024) // 64)
-        self.table = {}
-        self.max_entries = approx_entries
-
-    def get(self, key):
-        return self.table.get(key)
-
-    def store(self, key, entry):
-        if len(self.table) > self.max_entries:
-            # random prune
-            for k in list(self.table)[:len(self.table)//10]:
-                del self.table[k]
-        self.table[key] = entry
-
-# ---------------- Move ordering helpers ----------------
-def mvv_lva(move, board):
-    # higher is better
-    if board.is_capture(move):
-        captured = board.piece_at(move.to_square)
-        mover = board.piece_at(move.from_square)
-        if captured and mover:
-            return PIECE_VALUES[captured.piece_type] - (PIECE_VALUES[mover.piece_type] // 10)
-        else:
-            return 1000
-    # promotions
-    if move.promotion:
-        return PIECE_VALUES[move.promotion] + 800
-    return 0
-
-# ---------------- Evaluation ----------------
-
-def evaluate(board):
-    """Simple evaluation: material + piece-square + mobility + small king safety"""
-    if board.is_checkmate():
-        # if side to move is checkmated -> large negative
-        return -99999 if board.turn == chess.WHITE else 99999
-
-    material = 0
-    pst = 0
-    for square in chess.SQUARES:
-        piece = board.piece_at(square)
-        if piece:
-            val = PIECE_VALUES[piece.piece_type]
-            if piece.color == chess.WHITE:
-                material += val
-                pst += pst_score(piece.piece_type, square, chess.WHITE)
-            else:
-                material -= val
-                pst -= pst_score(piece.piece_type, square, chess.BLACK)
-    # mobility (legal moves count)
-    mobility = len(list(board.legal_moves))
-    # small king safety: penalty for open files near king (placeholder)
-    king_safety = 0
-    # combine
-    score = material + pst + 10 * (mobility if board.turn == chess.WHITE else -mobility) + king_safety
-    return score
-
-# ---------------- Search ----------------
-
-INFINITY = 100000
-
-class Search:
-    def __init__(self, board, tt_mb=64):
-        self.board = board
-        self.tt = TranspositionTable(mb=tt_mb)
+class Engine:
+    def __init__(self):
+        self.board = chess.Board()
+        self.stop_search = False
+        self.nodes = 0
         self.start_time = 0
-        self.stop_time = False
-        self.nodes = 0
-        self.best_move = None
-        self.killer = defaultdict(lambda: [None, None])
-        self.history = defaultdict(int)
+        self.time_limit = None
+        self.go_event = threading.Event()
+        self.search_thread = None
+        self.ponder = False
+        self.max_depth = MAX_DEPTH
+        self.lock = threading.Lock()
 
-    def time_up(self):
-        return self.stop_time
+    def uci(self):
+        print(f"id name {ENGINE_NAME}")
+        print(f"id author {ENGINE_AUTHOR}")
+        print("uciok")
+        sys.stdout.flush()
 
-    def think(self, wtime=None, btime=None, movetime=None, depth=None, skill=12):
-        self.start_time = time.time()
-        self.stop_time = False
-        self.nodes = 0
-        self.best_move = None
+    def isready(self):
+        print("readyok")
+        sys.stdout.flush()
 
-        max_depth = depth if depth is not None else skill_to_depth(skill)
-        if movetime:
-            end_time = self.start_time + movetime / 1000.0
-        elif wtime is not None or btime is not None:
-            remaining = wtime if self.board.turn == chess.WHITE else btime
-            if remaining is None:
-                end_time = None
-            else:
-                end_time = self.start_time + remaining / 1000.0 * 0.02 * (1 + skill/10)
-        else:
-            end_time = None
+    def ucinewgame(self):
+        with self.lock:
+            self.board.reset()
+            TT.clear()
 
-        best = None
-        best_score = -INFINITY
-        for d in range(1, max_depth + 1):
+    def setoption(self, name, value):
+        # support custom option: SkillLevel or MaxDepth
+        if name.lower() == "maxdepth":
             try:
-                score = self.alphabeta_root(d, end_time)
-            except TimeoutError:
-                break
-            if self.time_up():
-                break
-            if self.best_move:
-                best = self.best_move
-                best_score = score
-        return best, best_score, self.nodes
+                self.max_depth = int(value)
+            except:
+                pass
 
-    def alphabeta_root(self, depth, end_time):
-        alpha = -INFINITY
-        beta = INFINITY
-        best_score = -INFINITY
-        best_move = None
-        moves = list(self.board.legal_moves)
-        moves.sort(key=lambda m: -mvv_lva(m, self.board))
-        for move in moves:
-            if end_time and time.time() > end_time:
-                self.stop_time = True
-                raise TimeoutError
-            self.board.push(move)
-            self.nodes += 1
-            score = -self.alphabeta(depth - 1, -beta, -alpha, end_time)
-            self.board.pop()
-            if score > best_score:
-                best_score = score
-                best_move = move
-            if score > alpha:
-                alpha = score
-            if alpha >= beta:
-                break
-        self.best_move = best_move
-        return best_score
+    def position(self, tokens):
+        # tokens: list starting from 'position'
+        # examples: position startpos moves e2e4 e7e5
+        idx = 1
+        if tokens[1] == 'startpos':
+            self.board.reset()
+            idx = 2
+        elif tokens[1] == 'fen':
+            fen_parts = tokens[2:2+6]
+            fen = ' '.join(fen_parts)
+            self.board.set_fen(fen)
+            idx = 8
+        # process moves
+        if idx < len(tokens) and tokens[idx] == 'moves':
+            moves = tokens[idx+1:]
+            for mv in moves:
+                try:
+                    self.board.push_uci(mv)
+                except Exception:
+                    pass
 
-    def quiescence(self, alpha, beta, end_time):
-        if end_time and time.time() > end_time:
-            self.stop_time = True
-            raise TimeoutError
-        stand_pat = evaluate(self.board)
+    def go(self, tokens):
+        # handle simple time controls: movetime, wtime/btime/ponder
+        wtime = None
+        btime = None
+        movetime = None
+        depth = None
+        for i, t in enumerate(tokens):
+            if t == 'movetime':
+                movetime = int(tokens[i+1]) / 1000.0
+            if t == 'wtime':
+                wtime = int(tokens[i+1]) / 1000.0
+            if t == 'btime':
+                btime = int(tokens[i+1]) / 1000.0
+            if t == 'depth':
+                depth = int(tokens[i+1])
+            if t == 'ponder':
+                self.ponder = True
+        # decide time limit
+        if movetime:
+            self.time_limit = movetime
+        else:
+            # simple allocation: use 1/30 of remaining clock for a move
+            if self.board.turn == chess.WHITE and wtime:
+                self.time_limit = max(0.01, wtime / 30.0)
+            elif self.board.turn == chess.BLACK and btime:
+                self.time_limit = max(0.01, btime / 30.0)
+            else:
+                self.time_limit = None
+        if depth:
+            self.max_depth = depth
+        # start search thread
+        self.stop_search = False
+        self.go_event.clear()
+        self.search_thread = threading.Thread(target=self.search_root)
+        self.search_thread.start()
+
+    def stop(self):
+        self.stop_search = True
+        self.go_event.set()
+        if self.search_thread:
+            self.search_thread.join()
+
+    # Evaluation
+    def evaluate(self, board: chess.Board):
+        if board.is_checkmate():
+            return -999999 if board.turn else 999999
+        if board.is_stalemate() or board.is_insufficient_material():
+            return 0
+        val = 0
+        # material + pst
+        for piece_type in PIECE_VALUES:
+            for sq in board.pieces(piece_type, chess.WHITE):
+                val += PIECE_VALUES[piece_type]
+                val += PST[piece_type][sq]
+            for sq in board.pieces(piece_type, chess.BLACK):
+                val -= PIECE_VALUES[piece_type]
+                # mirror for black
+                val -= PST[piece_type][chess.square_mirror(sq)]
+        # mobility
+        val += 5 * (len(list(board.legal_moves)) if board.turn == chess.WHITE else -len(list(board.legal_moves)))
+        return val
+
+    def quiescence(self, board, alpha, beta):
+        stand_pat = self.evaluate(board)
         if stand_pat >= beta:
             return beta
         if alpha < stand_pat:
             alpha = stand_pat
-        moves = [m for m in self.board.legal_moves if self.board.is_capture(m)]
-        moves.sort(key=lambda m: -mvv_lva(m, self.board))
-        for move in moves:
-            self.board.push(move)
-            self.nodes += 1
-            score = -self.quiescence(-beta, -alpha, end_time)
-            self.board.pop()
+        # consider captures
+        for move in sorted(board.legal_moves, key=lambda m: -self.mv_capture_value(board, m)):
+            if not board.is_capture(move):
+                continue
+            board.push(move)
+            score = -self.quiescence(board, -beta, -alpha)
+            board.pop()
             if score >= beta:
                 return beta
             if score > alpha:
                 alpha = score
         return alpha
 
-    def alphabeta(self, depth, alpha, beta, end_time):
-        if end_time and time.time() > end_time:
-            self.stop_time = True
-            raise TimeoutError
-        self.nodes += 1
-
-        # Terminal checks
-        if self.board.is_checkmate():
-            return -99999 + (99 - depth)
-        if self.board.is_stalemate() or self.board.is_insufficient_material() or self.board.is_repetition(3):
+    def mv_capture_value(self, board, move):
+        if not board.is_capture(move):
             return 0
+        if board.is_en_passant(move):
+            return PIECE_VALUES[chess.PAWN]
+        captured = board.piece_at(move.to_square)
+        attacker = board.piece_at(move.from_square)
+        if captured:
+            return PIECE_VALUES[captured.piece_type] - PIECE_VALUES[attacker.piece_type]
+        return 0
 
-        # TT lookup
-        key = self.board.fen()
-        entry = self.tt.get(key)
-        original_alpha = alpha
-        if entry and entry.depth >= depth:
-            if entry.flag == 'EXACT':
-                return entry.score
-            elif entry.flag == 'LOWER':
-                if entry.score > alpha:
-                    alpha = entry.score
-            elif entry.flag == 'UPPER':
-                if entry.score < beta:
-                    beta = entry.score
-            if alpha >= beta:
-                return entry.score
+    def order_moves(self, board, moves):
+        # order by captures (most valuable victim - least valuable attacker), then promotions, then killer
+        def key(m):
+            score = 0
+            if board.is_capture(m):
+                captured = board.piece_at(m.to_square)
+                attacker = board.piece_at(m.from_square)
+                if captured:
+                    score += 1000 * PIECE_VALUES[captured.piece_type] - PIECE_VALUES[attacker.piece_type]
+            if m.promotion:
+                score += 800
+            # prefer checks (heuristic)
+            board.push(m)
+            if board.is_check():
+                score += 50
+            board.pop()
+            return -score
+        return sorted(moves, key=key)
 
+    def alpha_beta(self, board, depth, alpha, beta):
+        # timeout check
+        if self.time_limit is not None and time.time() - self.start_time > self.time_limit - TIME_BUFFER:
+            raise SearchTimeout()
+        self.nodes += 1
+        key = (board.zobrist_hash(), depth, board.turn)
+        if key in TT:
+            return TT[key]
         if depth == 0:
-            return self.quiescence(alpha, beta, end_time)
-
-        legal_moves = list(self.board.legal_moves)
-        # move ordering: prefer TT best, captures, killers, history
-        if entry and entry.best in legal_moves:
-            legal_moves.remove(entry.best)
-            legal_moves.insert(0, entry.best)
-
-        legal_moves.sort(key=lambda m: (-mvv_lva(m, self.board), -self.history[(m.from_square, m.to_square)]))
-
-        best_score = -INFINITY
-        best_move = None
-        for move in legal_moves:
-            self.board.push(move)
-            try:
-                score = -self.alphabeta(depth - 1, -beta, -alpha, end_time)
-            except TimeoutError:
-                self.board.pop()
-                raise
-            self.board.pop()
-            if score > best_score:
-                best_score = score
-                best_move = move
+            val = self.quiescence(board, alpha, beta)
+            TT[key] = val
+            return val
+        if board.is_checkmate():
+            return -999999
+        if board.is_stalemate():
+            return 0
+        max_eval = -9999999
+        moves = list(board.legal_moves)
+        moves = self.order_moves(board, moves)
+        for mv in moves:
+            board.push(mv)
+            score = -self.alpha_beta(board, depth-1, -beta, -alpha)
+            board.pop()
+            if score > max_eval:
+                max_eval = score
             if score > alpha:
                 alpha = score
             if alpha >= beta:
-                # store killer/history heuristics by depth (as proxy for ply)
-                ply = depth
-                if move not in [self.killer[ply][0], self.killer[ply][1]]:
-                    self.killer[ply][1] = self.killer[ply][0]
-                    self.killer[ply][0] = move
-                self.history[(move.from_square, move.to_square)] += 2 ** depth
                 break
+        TT[key] = max_eval
+        return max_eval
 
-        # store in TT
-        if best_score <= original_alpha:
-            flag = 'UPPER'
-        elif best_score >= beta:
-            flag = 'LOWER'
-        else:
-            flag = 'EXACT'
+    def search_root(self):
+        best_move = None
+        best_score = -9999999
+        self.start_time = time.time()
+        self.nodes = 0
+        try:
+            for depth in range(1, self.max_depth + 1):
+                if self.stop_search:
+                    break
+                # aspiration windows could be used; we keep simple
+                moves = list(self.board.legal_moves)
+                moves = self.order_moves(self.board, moves)
+                local_best = None
+                local_best_score = -9999999
+                for mv in moves:
+                    if self.stop_search:
+                        break
+                    self.board.push(mv)
+                    try:
+                        score = -self.alpha_beta(self.board, depth-1, -99999999, 99999999)
+                    except SearchTimeout:
+                        self.board.pop()
+                        raise
+                    self.board.pop()
+                    if score > local_best_score:
+                        local_best_score = score
+                        local_best = mv
+                if local_best is not None:
+                    best_move = local_best
+                    best_score = local_best_score
+                # report best move so far (UCI info)
+                elapsed = time.time() - self.start_time
+                nps = int(self.nodes / max(1.0, elapsed))
+                print(f"info depth {depth} score cp {best_score} nodes {self.nodes} nps {nps} time {int(elapsed*1000)} pv {best_move}")
+                sys.stdout.flush()
+        except SearchTimeout:
+            pass
+        if best_move is None:
+            # fallback: random legal move
+            try:
+                best_move = next(iter(self.board.legal_moves))
+            except StopIteration:
+                print("bestmove (none)")
+                sys.stdout.flush()
+                return
+        print(f"bestmove {best_move.uci()}")
+        sys.stdout.flush()
 
-        entry = TTEntry(depth, int(best_score), flag, best_move)
-        self.tt.store(key, entry)
-        return best_score
-
-# ---------------- UCI Loop ----------------
-
-class UCIEngine:
-    def __init__(self):
-        self.board = chess.Board()
-        self.searcher = Search(self.board, tt_mb=OPTIONS['Hash'])
-        self.uci_options = OPTIONS.copy()
-
-    def loop(self):
+    def run(self):
         while True:
             try:
                 line = sys.stdin.readline()
-            except KeyboardInterrupt:
-                break
-            if not line:
-                break
-            line = line.strip()
-            if line == "":
-                continue
-            parts = line.split()
-            cmd = parts[0]
-            if cmd == 'uci':
-                print(f"id name {ENGINE_NAME}")
-                print(f"id author {ENGINE_AUTHOR}")
-                print("option name Hash type spin default {} min 1 max 1024".format(self.uci_options['Hash']))
-                print("option name SkillLevel type spin default {} min 0 max 20".format(self.uci_options['SkillLevel']))
-                print("uciok")
-            elif cmd == 'isready':
-                print('readyok')
-            elif cmd == 'setoption':
-                try:
-                    name_idx = parts.index('name') + 1
-                    value_idx = parts.index('value') + 1
-                    name = ' '.join(parts[name_idx:value_idx - 1])
-                    value = ' '.join(parts[value_idx:])
-                except ValueError:
-                    name = parts[2] if len(parts) > 2 else ''
-                    value = parts[4] if len(parts) > 4 else ''
-                name = name.strip()
-                value = value.strip()
-                if name == 'Hash' and value.isdigit():
-                    self.uci_options['Hash'] = int(value)
-                    self.searcher.tt = TranspositionTable(mb=self.uci_options['Hash'])
-                elif name == 'SkillLevel' and value.isdigit():
-                    self.uci_options['SkillLevel'] = int(value)
-                # ignore others for now
-            elif cmd == 'ucinewgame':
-                self.board.reset()
-                self.searcher = Search(self.board, tt_mb=self.uci_options['Hash'])
-            elif cmd == 'position':
-                # position [fen <fen> | startpos ]  moves <move1> ...
-                try:
-                    if 'startpos' in parts:
-                        self.board.reset()
-                    elif 'fen' in parts:
-                        fen_idx = parts.index('fen') + 1
-                        if 'moves' in parts:
-                            moves_idx = parts.index('moves')
-                            fen = ' '.join(parts[fen_idx:moves_idx])
-                        else:
-                            fen = ' '.join(parts[fen_idx:])
-                        self.board.set_fen(fen)
-                    if 'moves' in parts:
-                        moves_idx = parts.index('moves') + 1
-                        moves = parts[moves_idx:]
-                        for m in moves:
-                            try:
-                                move = chess.Move.from_uci(m)
-                                if move in self.board.legal_moves:
-                                    self.board.push(move)
-                                else:
-                                    # illegal move in provided list -> ignore
-                                    pass
-                            except Exception:
-                                pass
-                except Exception:
-                    # ignore malformed position command
-                    pass
-            elif cmd == 'go':
-                wtime = btime = movetime = depth = None
-                if 'wtime' in parts:
+                if not line:
+                    break
+                line = line.strip()
+                if line == '':
+                    continue
+                tokens = line.split()
+                cmd = tokens[0]
+                if cmd == 'uci':
+                    self.uci()
+                elif cmd == 'isready':
+                    self.isready()
+                elif cmd == 'ucinewgame':
+                    self.ucinewgame()
+                elif cmd == 'position':
+                    self.position(tokens)
+                elif cmd == 'go':
+                    self.go(tokens)
+                elif cmd == 'stop':
+                    self.stop()
+                elif cmd == 'quit':
+                    self.stop()
+                    break
+                elif cmd == 'setoption':
+                    # setoption name <name> value <value>
+                    # naive parse
                     try:
-                        wtime = int(parts[parts.index('wtime') + 1])
+                        name_idx = tokens.index('name') + 1
+                        val_idx = tokens.index('value') + 1
+                        name = ' '.join(tokens[name_idx:val_idx-1])
+                        value = ' '.join(tokens[val_idx:])
+                        self.setoption(name, value)
                     except Exception:
-                        wtime = None
-                if 'btime' in parts:
-                    try:
-                        btime = int(parts[parts.index('btime') + 1])
-                    except Exception:
-                        btime = None
-                if 'movetime' in parts:
-                    try:
-                        movetime = int(parts[parts.index('movetime') + 1])
-                    except Exception:
-                        movetime = None
-                if 'depth' in parts:
-                    try:
-                        depth = int(parts[parts.index('depth') + 1])
-                    except Exception:
-                        depth = None
-                best, score, nodes = self.searcher.think(wtime=wtime, btime=btime, movetime=movetime, depth=depth, skill=self.uci_options['SkillLevel'])
-                if best is None:
-                    print('bestmove 0000')
+                        pass
                 else:
-                    print(f"bestmove {best.uci()}")
-            elif cmd == 'quit':
-                break
-            sys.stdout.flush()
+                    # ignore unhandled commands
+                    pass
+            except Exception as e:
+                # keep engine alive on errors
+                print(f"debug {e}")
+                sys.stdout.flush()
 
 
 if __name__ == '__main__':
-    engine = UCIEngine()
-    if sys.stdin.isatty():
-        print(f"{ENGINE_NAME} by {ENGINE_AUTHOR} - running in UCI mode. Type 'uci' to start.")
-    engine.loop()
+    engine = Engine()
+    engine.run()
