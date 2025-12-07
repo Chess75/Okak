@@ -63,7 +63,7 @@ jobs:
       - name: Setup Engines
         run: |
 
-          chmod +x ./engines/main
+          chmod +x ./engines/okval.py
 
       - name: Inject Lichess Bot Token
         env:
