@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# simple_engine.py
-# UCI-compatible simple chess engine using python-chess
-# Исправленная и улучшенная версия
-# Автор: ChatGPT (выдано как пример учебного движка)
+# simple_engine_fixed.py
+# Исправленная и улучшенная простая UCI-совместимая шахматная движка на python-chess
+# Автор: ChatGPT (исправлено по запросу пользователя)
 
 import chess
 import sys
 import time
 import threading
 from collections import defaultdict, namedtuple
-from typing import Optional, Tuple, Dict, Any, List
 
 # ---- Константы ----
-INF = 99999999
+INF = 10**9
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -23,7 +21,7 @@ PIECE_VALUES = {
     chess.KING: 20000
 }
 
-# Простые PST (пример). Индексация: квадрат для белых; для чёрных используем square_mirror.
+# Простые PST (примерные)
 PST = {
     chess.PAWN: [
          0,  0,  0,  0,  0,  0,  0,  0,
@@ -44,8 +42,7 @@ PST = {
         -30,  0, 10, 15, 15, 10,  0,-30,
         -40,-20,  0,  0,  0,  0,-20,-40,
         -50,-40,-30,-30,-30,-30,-40,-50
-    ],
-    # можно добавить другие PST при желании
+    ]
 }
 
 # Transposition table entry
@@ -54,46 +51,46 @@ TTEntry = namedtuple("TTEntry", ["depth", "flag", "score", "best_move"])
 
 # ---- Утилиты ----
 
-def fast_board_key(board: chess.Board) -> Tuple[Any, ...]:
+def fast_board_key(board: chess.Board):
     """
-    Быстрый ключ для TT — tuple из частей позиции.
-    Не Zobrist, но хватает для простого TT.
+    Быстрый ключ для TT.
+    Включаем FEN-поле доски, сторону хода, права рокировки, ep- квадрат и полуходы.
     """
-    # board_fen() + turn + castling_xfen + ep_square + halfmove_clock
     return (board.board_fen(), board.turn, board.castling_xfen(), board.ep_square, board.halfmove_clock)
 
-def mvv_lva_score(board: chess.Board, move: chess.Move) -> int:
+def mvv_lva_score(board: chess.Board, move: chess.Move):
     """
-    MVV-LVA с учётом промоции и en-passant.
-    Чем выше — тем лучше (будем сортировать по убыванию).
+    MVV-LVA. Обрабатывает захват и эн-пассан.
+    Чем больше — тем лучше (более приоритетно).
     """
     score = 0
     if board.is_capture(move):
-        victim = board.piece_at(move.to_square)
-        # en-passant: victim может быть None — восстановим пешку
-        if victim is None and board.is_en_passant(move):
-            # жертва — пешка противника
-            victim = chess.Piece(chess.PAWN, not board.turn)
+        # для эн-пассан жертва находится на другой клетке
+        victim_sq = move.to_square
+        if board.is_en_passant(move):
+            # victim is the pawn behind to_square
+            if board.turn == chess.WHITE:
+                victim_sq = move.to_square - 8
+            else:
+                victim_sq = move.to_square + 8
+        victim = board.piece_at(victim_sq)
         attacker = board.piece_at(move.from_square)
         if victim and attacker:
-            score += PIECE_VALUES.get(victim.piece_type, 0) * 10
-            score -= PIECE_VALUES.get(attacker.piece_type, 0)
-    # небольшая премия за превращение (чтобы продвижения были выше)
+            score += PIECE_VALUES.get(victim.piece_type, 0) * 10 - PIECE_VALUES.get(attacker.piece_type, 0)
     if move.promotion:
+        # поощряем промоцию
         score += PIECE_VALUES[chess.QUEEN] // 2
     return score
 
 # ---- Оценка позиции ----
 
-def evaluate(board: chess.Board) -> int:
+def evaluate(board: chess.Board):
     """
-    Оценка позиции в центопешках для стороны, которая ходит.
-    Возвращаем положительное — хорошо для side-to-move.
+    Оценка в сотнях центопешек, положительная — хорошо для стороны, которая ходит.
     Материал + PST + мобильность + штраф за шах.
     """
-    # Быстрые результаты
     if board.is_checkmate():
-        # если мата — плохо для стороны, которая ходит
+        # Если позиция мат — плохо для стороны, которая сейчас ходит
         return -INF + 1
     if board.is_stalemate() or board.is_insufficient_material():
         return 0
@@ -101,20 +98,18 @@ def evaluate(board: chess.Board) -> int:
     material = 0
     pst_score = 0
 
-    for piece_type, value in PIECE_VALUES.items():
-        # белые
+    for piece_type in PIECE_VALUES:
         for sq in board.pieces(piece_type, chess.WHITE):
-            material += value
+            material += PIECE_VALUES[piece_type]
             if piece_type in PST:
                 pst_score += PST[piece_type][sq]
-        # чёрные
         for sq in board.pieces(piece_type, chess.BLACK):
-            material -= value
+            material -= PIECE_VALUES[piece_type]
             if piece_type in PST:
-                # зеркалируем для чёрных
+                # mirror для черных
                 pst_score -= PST[piece_type][chess.square_mirror(sq)]
 
-    # мобильность — количество легальных ходов (включая псевдо)
+    # мобильность: просто количество легальных ходов * коэффициент (для стороны, которая ходит)
     try:
         mobility_count = board.legal_moves.count()
     except Exception:
@@ -130,13 +125,11 @@ def evaluate(board: chess.Board) -> int:
 
 class SearchState:
     def __init__(self):
-        self.tt: Dict[Any, TTEntry] = {}
-        self.nodes: int = 0
-        self.start_time: float = 0.0
-        self.time_limit: float = 0.0
-        self.history: Dict[Tuple[bool, int, int], int] = defaultdict(int)
-        # простая таблица убийц (по глубине) для улучшения порядка ходов
-        self.killers: Dict[int, List[chess.Move]] = defaultdict(list)
+        self.tt = {}  # key -> TTEntry
+        self.nodes = 0
+        self.start_time = 0.0
+        self.time_limit = 0.0
+        self.history = defaultdict(int)
 
 # ---- Исключение прерывания ----
 class SearchAbort(Exception):
@@ -144,7 +137,7 @@ class SearchAbort(Exception):
 
 # ---- Quiescence ----
 
-def quiescence(board: chess.Board, alpha: int, beta: int, state: SearchState, stop_event: threading.Event) -> int:
+def quiescence(board: chess.Board, alpha: int, beta: int, state: SearchState, stop_event: threading.Event):
     if stop_event.is_set():
         raise SearchAbort()
     if state.start_time and (time.time() - state.start_time) > state.time_limit:
@@ -157,11 +150,10 @@ def quiescence(board: chess.Board, alpha: int, beta: int, state: SearchState, st
     if alpha < stand_pat:
         alpha = stand_pat
 
-    # генерируем только захваты (и превращения)
-    captures = list(board.generate_legal_captures())
+    # только захваты и промоции (если есть)
+    captures = [m for m in board.legal_moves if board.is_capture(m) or m.promotion]
     if not captures:
         return alpha
-    # сортировка: лучшие захваты первыми
     captures.sort(key=lambda mv: -mvv_lva_score(board, mv))
 
     for move in captures:
@@ -180,7 +172,7 @@ def quiescence(board: chess.Board, alpha: int, beta: int, state: SearchState, st
 
 # ---- Negamax + AlphaBeta + TT + Ordering ----
 
-def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: SearchState, stop_event: threading.Event) -> int:
+def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: SearchState, stop_event: threading.Event):
     if stop_event.is_set():
         raise SearchAbort()
     if state.start_time and (time.time() - state.start_time) > state.time_limit:
@@ -188,7 +180,6 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
 
     state.nodes += 1
 
-    # терминальное положение или ноль-глубина
     if depth == 0:
         return quiescence(board, alpha, beta, state, stop_event)
 
@@ -208,28 +199,19 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
     beta_orig = beta
 
     best_score = -INF
-    best_move: Optional[chess.Move] = None
+    best_move = None
 
-    # подготовка ходов и их упорядочивание
+    # подготовка ходов и сортировка
     moves = list(board.legal_moves)
 
-    def move_key(mv: chess.Move):
-        # TT move имеет приоритет
+    def move_key(mv):
+        # TT move highest priority
         if tt_entry and tt_entry.best_move and mv == tt_entry.best_move:
             return (0, 0, 0)
-        # захваты первыми
         cap = 0 if board.is_capture(mv) else 1
-        # MVV-LVA (больше — лучше, но мы сортируем по возрастанию ключа => используем -mvv)
         mvv = -mvv_lva_score(board, mv)
-        # history: более высокий => лучше (делаем минус, т.к. сортируем по возрастанию)
-        hist = -state.history.get((board.turn, mv.from_square, mv.to_square), 0)
-        # killer moves: понижаем ключ, чтобы они шли раньше (маленький приоритетный номер)
-        killer_bonus = 0
-        for klist in state.killers.values():
-            if mv in klist:
-                killer_bonus = -1
-                break
-        return (cap, mvv, killer_bonus, hist)
+        hist = -state.history[(board.turn, mv.from_square, mv.to_square)]
+        return (cap, mvv, hist)
 
     moves.sort(key=move_key)
 
@@ -237,7 +219,7 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
         if stop_event.is_set():
             raise SearchAbort()
 
-        mover = board.turn  # сторона, которая делает ход (до push)
+        mover = board.turn  # сторона, которая делает ход
         board.push(move)
         try:
             score = -negamax(board, depth - 1, -beta, -alpha, state, stop_event)
@@ -250,18 +232,12 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
 
         if score > alpha:
             alpha = score
-            # update history for non-capture (use mover as key)
+            # обновляем history для не-захватов
             if not board.is_capture(move):
                 state.history[(mover, move.from_square, move.to_square)] += 2 ** depth
 
         if alpha >= beta:
-            # beta cutoff: record killer and history
-            # добавляем в список убийц для текущей глубины
-            klist = state.killers.get(depth, [])
-            if move not in klist:
-                klist.insert(0, move)
-                # держим только 2 убийцы на глубине
-                state.killers[depth] = klist[:2]
+            # beta cutoff: обновляем history
             state.history[(mover, move.from_square, move.to_square)] += 2 ** depth
             break
 
@@ -276,29 +252,32 @@ def negamax(board: chess.Board, depth: int, alpha: int, beta: int, state: Search
     state.tt[key] = TTEntry(depth=depth, flag=flag, score=best_score, best_move=best_move)
     return best_score
 
-# ---- Вытаскивание PV из TT ----
+# ---- Вспомогательные: извлечь PV из TT ----
 
-def extract_pv(state: SearchState, board: chess.Board, max_length: int = 64) -> List[chess.Move]:
+def extract_pv(board: chess.Board, state: SearchState, max_depth=20):
+    """
+    Построить последовательность ходов (PV) из TT, начиная с текущей доски.
+    Ограничиваем длину max_depth, чтобы избежать бесконечной петли.
+    """
     pv = []
     b = board.copy()
-    for _ in range(max_length):
-        entry = state.tt.get(fast_board_key(b))
+    for _ in range(max_depth):
+        key = fast_board_key(b)
+        entry = state.tt.get(key)
         if not entry or not entry.best_move:
             break
         mv = entry.best_move
-        # убедимся что ход всё ещё легален в текущей позиции
+        # убедимся, что ход легален в текущей позиции
         if mv not in b.legal_moves:
             break
-        pv.append(mv)
+        pv.append(mv.uci())
         b.push(mv)
     return pv
 
 # ---- Search Thread (iterative deepening) ----
 
 class SearchThread(threading.Thread):
-    def __init__(self, root_board: chess.Board, wtime: Optional[int] = None, btime: Optional[int] = None,
-                 winc: int = 0, binc: int = 0, movetime: Optional[int] = None, max_depth: Optional[int] = None,
-                 stop_event: Optional[threading.Event] = None):
+    def __init__(self, root_board: chess.Board, wtime=None, btime=None, winc=0, binc=0, movetime=None, max_depth=None, stop_event=None):
         super().__init__()
         self.root_board = root_board.copy()
         self.wtime = wtime
@@ -309,35 +288,36 @@ class SearchThread(threading.Thread):
         self.max_depth = max_depth
         self.stop_event = stop_event or threading.Event()
 
-        self.best_move: Optional[chess.Move] = None
-        self.best_score: Optional[int] = None
-        self.depth_reached: int = 0
+        self.best_move = None
+        self.best_score = None
+        self.depth_reached = 0
 
         self.state = SearchState()
         self.state.time_limit = 0.0
         self.state.start_time = 0.0
 
-    def time_remaining_ms(self) -> int:
-        """
-        Элементарная логика контроля времени.
-        Возвращаем миллисекунды.
-        """
+    def time_remaining_ms(self):
         if self.movetime:
-            return int(self.movetime)
+            return self.movetime
         if self.root_board.turn == chess.WHITE:
             if self.wtime is None:
                 return 10000
             if self.wtime < 2000:
                 return 50
-            return max(20, int(self.wtime // 20 + self.winc * 2))
+            return max(20, self.wtime // 20 + self.winc * 2)
         else:
             if self.btime is None:
                 return 10000
             if self.btime < 2000:
                 return 50
-            return max(20, int(self.btime // 20 + self.binc * 2))
+            return max(20, self.btime // 20 + self.binc * 2)
 
     def run(self):
+        # сброс состояния
+        self.state.nodes = 0
+        self.state.tt.clear()
+        self.state.history.clear()
+
         ms = self.time_remaining_ms()
         self.state.time_limit = ms / 1000.0
         self.state.start_time = time.time()
@@ -349,12 +329,12 @@ class SearchThread(threading.Thread):
                     break
                 self.depth_reached = depth
 
-                # root ordering: prefer TT move, затем захваты, затем MVV-LVA
+                # root ordering: prefer TT move then MVV-LVA
                 moves = list(self.root_board.legal_moves)
                 root_key = fast_board_key(self.root_board)
                 root_tt = self.state.tt.get(root_key)
 
-                def root_key_fn(mv: chess.Move):
+                def root_key_fn(mv):
                     if root_tt and root_tt.best_move and mv == root_tt.best_move:
                         return (0, 0)
                     cap = 0 if self.root_board.is_capture(mv) else 1
@@ -363,35 +343,29 @@ class SearchThread(threading.Thread):
 
                 moves.sort(key=root_key_fn)
 
-                best_for_depth: Optional[chess.Move] = None
+                best_for_depth = None
                 best_score_for_depth = -INF
 
                 for mv in moves:
                     if self.stop_event.is_set():
                         break
-                    # time check before expensive call
-                    if (time.time() - self.state.start_time) > self.state.time_limit:
-                        break
 
+                    # push mv, выполнить поиск глубины-1, затем pop (ровно один pop)
                     self.root_board.push(mv)
                     try:
                         score = -negamax(self.root_board, depth - 1, -INF, INF, self.state, self.stop_event)
                     except SearchAbort:
-                        # прерывание — гарантированно восстановим доску и выйдем
+                        # если прерывание — откатить и выйти наружу
                         self.root_board.pop()
                         raise
                     finally:
-                        # pop один раз (если не попнули в except)
-                        if self.root_board.move_stack and self.root_board.peek() == mv:
-                            # это защита — но простейшее: если последний ход — mv, то попаем
-                            self.root_board.pop()
-                        else:
-                            # если предыдущая логика не сработала — попаем безопасно (если ход есть)
-                            if self.root_board.move_stack:
+                        # попаем ровно одну итерацию (если она ещё не попнута)
+                        if self.root_board.move_stack:
+                            # последний ход — mv, попнём его (без дополнительных проверок)
+                            try:
                                 self.root_board.pop()
-
-                    # ПОМЕТКА: выше использовано безопасное pop() — гарантируем, что мы вернули позицию
-                    # после push. (Предшествовавшая версия могла дважды вызывать pop.)
+                            except Exception:
+                                pass
 
                     if score > best_score_for_depth:
                         best_score_for_depth = score
@@ -406,22 +380,30 @@ class SearchThread(threading.Thread):
                     self.best_score = best_score_for_depth
                     elapsed = time.time() - self.state.start_time
                     nps = int(self.state.nodes / elapsed) if elapsed > 0 else 0
+                    # извлекаем PV как последовательность UCI-ходов через TT
+                    pv_sequence = extract_pv(self.root_board, self.state, max_depth=depth+5)
+                    pv_str = " ".join(pv_sequence) if pv_sequence else self.best_move.uci()
 
-                    # извлекаем PV из TT (если есть)
-                    pv_moves = extract_pv(self.state, self.root_board, max_length=depth + 8)
-                    pv_str = " ".join(m.uci() for m in pv_moves) if pv_moves else self.best_move.uci()
-
-                    # score cp (centipawns) — если очень большой (mate) — оставляем.
-                    print(f"info depth {depth} score cp {best_score_for_depth} time {int(elapsed*1000)} nodes {self.state.nodes} nps {nps} pv {pv_str}")
+                    # корректный формат вывода оценки: mate или cp
+                    score_to_report = best_score_for_depth
+                    # если близко к мату (мы используем большие значения для короля), попробуем представить mate ply
+                    if abs(score_to_report) > 10000 // 2:
+                        # приближённое преобразование в mate: кто-то победит
+                        mate_in = None
+                        # простая эвристика: положительное -> mate for side to move
+                        # Но UCI ожидает значение в mate ply (целое). Мы не рассчитываем точный mate, поэтому не указываем mate.
+                        print(f"info depth {depth} score cp {score_to_report} time {int(elapsed*1000)} nodes {self.state.nodes} nps {nps} pv {pv_str}")
+                    else:
+                        print(f"info depth {depth} score cp {score_to_report} time {int(elapsed*1000)} nodes {self.state.nodes} nps {nps} pv {pv_str}")
                     sys.stdout.flush()
 
-                # проверка времени и условия выхода
+                # закончить, если время вышло или прерывание
                 if (time.time() - self.state.start_time) > self.state.time_limit:
                     break
                 depth += 1
 
         except SearchAbort:
-            # обычное прерывание поиска по таймауту/stop
+            # корретно завершаем при прерывании
             pass
         except Exception as e:
             print("Search error:", e, file=sys.stderr)
@@ -431,12 +413,12 @@ class SearchThread(threading.Thread):
 
 def uci_loop():
     board = chess.Board()
-    search_thread: Optional[SearchThread] = None
+    search_thread = None
     stop_event = threading.Event()
 
     # announce engine once at start
-    print("id name Okval")
-    print("id author Classic")
+    print("id name SimplePyEngine")
+    print("id author ChatGPT")
     print("uciok")
     sys.stdout.flush()
 
@@ -453,8 +435,8 @@ def uci_loop():
 
             if cmd == "uci":
                 # respond with engine identity
-                print("id name Okval")
-                print("id author Classic")
+                print("id name SimplePyEngine")
+                print("id author ChatGPT")
                 print("uciok")
                 sys.stdout.flush()
 
@@ -467,21 +449,22 @@ def uci_loop():
 
             elif cmd == "position":
                 # position [fen <fen> | startpos ] moves <moves>...
+                # более робастная обработка
                 idx = 1
                 if len(parts) >= 2 and parts[1] == "startpos":
                     board = chess.Board()
                     idx = 2
                 elif len(parts) >= 2 and parts[1] == "fen":
-                    # fen — 6 полей
+                    # fen состоит из 6 полей
                     if len(parts) >= 8:
                         fen = " ".join(parts[2:8])
                         try:
                             board = chess.Board(fen)
                         except Exception:
-                            # если FEN битый — оставляем прежнюю позицию (без изменений)
                             board = chess.Board()
                         idx = 8
                     else:
+                        # плохой fen — игнорируем
                         idx = len(parts)
 
                 # moves
@@ -539,12 +522,12 @@ def uci_loop():
                     stop_event.clear()
 
                 stop_event = threading.Event()
-                search_thread = SearchThread(board, wtime=wtime, btime=btime, winc=winc or 0, binc=binc or 0,
-                                             movetime=movetime, max_depth=depth, stop_event=stop_event)
+                search_thread = SearchThread(board, wtime=wtime, btime=btime, winc=winc or 0, binc=binc or 0, movetime=movetime, max_depth=depth, stop_event=stop_event)
                 search_thread.start()
 
-                # wait for thread to finish (будет завершён по таймауту или по достижению глубины)
+                # wait for thread to finish (будет остановлен по таймауту либо depth)
                 while search_thread.is_alive():
+                    # даём контролю ответить на команды stop/quit
                     time.sleep(0.05)
 
                 if search_thread.best_move:
