@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 # simple_engine_fixed.py
 # Исправленная и улучшенная версия UCI-движка на python-chess
 # Основные правки:
@@ -8,6 +7,7 @@
 # - Корректное обновление history-heuristic (используется сторона, сделавшая ход)
 # - Улучшенное MVV-LVA (учтён en-passant)
 # - Безопасный подсчёт mobility
+# - Быстрая логика для жёсткого цейтнота: при очень малом времени выбирается быстрый, но логичный ход (captures, checks, promotions, safe replies)
 # - Небольшие улучшения логирования и устойчивости к ошибкам
 
 import chess
@@ -261,20 +261,73 @@ class SearchThread(threading.Thread):
         self.state.start_time = 0.0
 
     def time_remaining_ms(self):
+        """
+        Логика распределения времени. Возвращает миллисекунды.
+        Улучшение: при очень малом времени (<400ms) мы отметаем глубокий поиск и используем "быструю" эвристику.
+        """
         if self.movetime:
             return self.movetime
         if self.root_board.turn == chess.WHITE:
             if self.wtime is None:
                 return 10000
+            if self.wtime < 400:
+                return max(50, self.wtime // 4)
             if self.wtime < 2000:
-                return 50
+                return max(50, self.wtime // 8 + self.winc)
             return max(20, self.wtime // 20 + self.winc * 2)
         else:
             if self.btime is None:
                 return 10000
+            if self.btime < 400:
+                return max(50, self.btime // 4)
             if self.btime < 2000:
-                return 50
+                return max(50, self.btime // 8 + self.binc)
             return max(20, self.btime // 20 + self.binc * 2)
+
+    def quick_move(self):
+        """
+        Быстрый выбор хода при жёстком цейтноте: сортируем ходы по приоритету
+        captures > promotions > checks > тихие ходы с history > случай.
+        Затем делаем shallow eval (одноходовую) и выбираем лучший по evaluate.
+        Это даёт логичный и быстрый ответ без глубокого поиска.
+        """
+        board = self.root_board
+        moves = list(board.legal_moves)
+        # приоритеты
+        def quick_key(mv):
+            p = 0
+            if board.is_capture(mv):
+                p -= 1000 - mvv_lva_score(board, mv)
+            if mv.promotion:
+                p -= 800
+            # gives +500 if move gives check
+            board.push(mv)
+            gives_check = board.is_check()
+            board.pop()
+            if gives_check:
+                p -= 500
+            # history heuristic (prefer larger)
+            p += -self.state.history[(board.turn, mv.from_square, mv.to_square)]
+            return p
+
+        moves.sort(key=quick_key)
+        best = None
+        best_score = -INF
+        # shallow evaluate: push move, eval static, pick best
+        for mv in moves[:12]:  # ограничим до 12 лучших кандидатов
+            board.push(mv)
+            try:
+                sc = evaluate(board)
+                # score from side to move perspective; we want good for player who just moved => negate
+                sc = -sc
+            finally:
+                board.pop()
+            if sc > best_score:
+                best_score = sc
+                best = mv
+        if best is None and moves:
+            best = moves[0]
+        return best
 
     def run(self):
         ms = self.time_remaining_ms()
@@ -283,6 +336,16 @@ class SearchThread(threading.Thread):
 
         depth = 1
         try:
+            # Special-case: если времени совсем мало — быстрый ход
+            if ms < 400:
+                mv = self.quick_move()
+                if mv:
+                    self.best_move = mv
+                    self.best_score = None
+                    print(f"info depth 0 time {int((time.time()-self.state.start_time)*1000)} nodes {self.state.nodes} pv {mv.uci()}")
+                    sys.stdout.flush()
+                return
+
             while not self.stop_event.is_set():
                 if self.max_depth and depth > self.max_depth:
                     break
@@ -309,15 +372,12 @@ class SearchThread(threading.Thread):
                     if self.stop_event.is_set():
                         break
                     mover = self.root_board.turn
-                    # push once, pop once (без двойного pop даже при исключениях)
                     self.root_board.push(mv)
                     try:
                         score = -negamax(self.root_board, depth - 1, -INF, INF, self.state, self.stop_event)
                     except SearchAbort:
-                        # просто пробрасываем, но НЕ вызываем pop здесь
                         raise
                     finally:
-                        # гарантированно снимаем ход ровно один раз
                         self.root_board.pop()
 
                     if score > best_score_for_depth:
@@ -346,13 +406,12 @@ class SearchThread(threading.Thread):
                 depth += 1
 
         except SearchAbort:
-            # корректное окончание
             pass
         except Exception as e:
             print("Search error:", e, file=sys.stderr)
             sys.stderr.flush()
 
-        # По завершении — печатаем bestmove (UCI требует вывод bestmove при завершении поиска)
+        # По завершении — печатаем bestmove
         if self.best_move:
             try:
                 print(f"bestmove {self.best_move.uci()}")
@@ -361,7 +420,6 @@ class SearchThread(threading.Thread):
                 print("bestmove 0000")
                 sys.stdout.flush()
         else:
-            # если ничего не найдено, попробуем любой легальный ход
             try:
                 fb = next(iter(self.root_board.legal_moves))
                 print(f"bestmove {fb.uci()}")
@@ -376,8 +434,8 @@ def uci_loop():
     board = chess.Board()
     search_thread = None
     stop_event = threading.Event()
-    print("id name Okval-fixed")
-    print("id author Classic-fixed")
+    print("id name Okval 1.0 T")
+    print("id author Classic")
     print("uciok")
     sys.stdout.flush()
 
@@ -393,7 +451,7 @@ def uci_loop():
             cmd = parts[0]
 
             if cmd == "uci":
-                print("id name Okval 1.0")
+                print("id name Okval 1.0 T")
                 print("id author Classic")
                 print("uciok")
                 sys.stdout.flush()
@@ -470,13 +528,10 @@ def uci_loop():
                 # запускаем асинхронно — поток сам выведет bestmove при завершении
                 search_thread.start()
 
-                # НЕ блокируем основной loop — lichess/uci controller может отправить stop/quit
-
             elif cmd == "stop":
                 if search_thread and search_thread.is_alive():
                     stop_event.set()
                     search_thread.join(timeout=2.0)
-                # Ничего дополнительно не печатаем — поток печатает bestmove при завершении
 
             elif cmd == "quit":
                 if search_thread and search_thread.is_alive():
