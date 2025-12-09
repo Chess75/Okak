@@ -3,7 +3,7 @@ token: ""         # Lichess OAuth2 Token.
 engines:
   standard:                               # Engine used for standard chess and when no suitable special engine is configured.
     dir: "./engines"                      # Directory containing the engine.
-    name: "okval.py"             # Binary name of the engine to use.
+    name: "okval.py"                      # Binary name of the engine to use.
     ponder: true                          # Think on opponent's time.
     silence_stderr: false                 # Suppresses stderr output.
     move_overhead_multiplier: 1.0         # Increase if your bot flags games too often. Default move overhead is 1 second per 1 minute initital time.
@@ -61,7 +61,7 @@ gaviota:
   max_pieces: 5                           # Count of max pieces in the local gaviota endgame tablebases.
 
 opening_books:
-  enabled: false                          # Activate opening books.
+  enabled: true                          # Activate opening books.
   priority: 400                           # Priority with which this move source is used. Higher priority is used first.
   books:
 #   bullet:
@@ -78,7 +78,7 @@ opening_books:
 #     max_depth: 16                       # Half move max depth. (Comment this line for max depth)
 #     allow_repetitions: false            # Whether the book can create repetitions on the board. Can lead to unintentional draws.
       names:                              # List of names of books to use if there is no specific book for the time control, white, black or chess960.
-        - DefaultBook
+        - White
 #   Use the same pattern for 'bullet', 'blitz', 'rapid', 'classical', time controls in initial_minutes+increment_seconds format,
 #   'antichess', 'atomic', 'chess960', 'crazyhouse', 'horde', 'kingofthehill', 'racingkings' and '3check' as well.
 #   Append '_white', '_black', '_human', '_bot', '_rated', '_casual' and/or '_tournament'
@@ -224,4 +224,4 @@ online_blacklists:                        # List of URLs for online blacklists. 
 # - https://raw.githubusercontent.com/xu-shawn/lichess-bots-blocklist/refs/heads/main/blocklist  # Contains most of the bot accounts that use Stockfish.
 
 books:                                    # Names of the opening books (to be used above in the opening_books section) and paths to the opening books.
-  DefaultBook: "/path/to/DefaultBook.bin"
+  White: "/engines/books/white.bin"
